@@ -4,18 +4,28 @@ import axios from 'axios';
 import 'dotenv/config';
 import path from 'path';
 import fs from 'fs';
+import { JSDOM } from 'jsdom';
 
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import * as jsforce from 'jsforce'; // Import jsforce for Salesforce connection
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { ChatPromptTemplate } from "@langchain/core/prompts";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+import http from 'http';
+import WebSocket from 'ws';
+
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const app = express();
+app.use(cors());
 
 // Initialize Google Generative AI
-const genAI = new GoogleGenerativeAI('AIzaSyAF0TUxoaLIV9hQbCKj6jlUFyXA64KecG8');
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+// Initialize Gemini with 1.5 Flash model
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // Middleware
 app.use(cors({
@@ -33,7 +43,7 @@ app.post('/api/emails', async (req, res) => {
 
     try {
         // Fetch user's emails using Graph API
-        const response = await axios.get("https://graph.microsoft.com/v1.0/me/messages", {
+        const response = await axios.get("https://graph.microsoft.com/v1.0/me/messages?$top=50", {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
             },
@@ -42,7 +52,7 @@ app.post('/api/emails', async (req, res) => {
         const emails = response.data.value; // Extract the emails
         res.status(200).json({ emails });
     } catch (error) {
-        console.error("Error fetching emails:", error);
+        //console.error("Error fetching emails:", error);
         return res.status(500).json({ message: "Error fetching emails" });
     }
 });
@@ -66,7 +76,7 @@ app.post("/api/folders", async (req, res) => {
         );
 
         // Log the fetched folders for debugging
-        console.log('Fetched folders:', response.data);
+       // console.log('Fetched folders:', response.data);
 
         // Return the response data in the desired format
         return res.status(200).json({
@@ -83,7 +93,7 @@ app.post("/api/folders", async (req, res) => {
             }))
         });
     } catch (error) {
-        console.error('Error fetching folders:', error);
+        //console.error('Error fetching folders:', error);
         return res.status(500).json({ error: 'Failed to fetch folders' });
     }
 });
@@ -116,39 +126,105 @@ app.post("/api/folders", async (req, res) => {
 
 // Endpoint summarize stream 
 
-// Endpoint to summarize the email using AI
+// // Endpoint to summarize the email using AI
+// app.post('/api/summarize', async (req, res) => {
+//     try {
+//         const { body } = req.body;
+
+//         // Validate email content
+//         if (!body || typeof body !== 'string') {
+//             return res.status(400).json({ error: 'Invalid email content provided' });
+//         }
+//         // masked body
+//         // Mask the PII
+//         const maskedText = maskPII(body);
+//         const demaskedText=demaskPII(maskedText);
+//         console.log('Masked Text::::', maskedText);
+//         console.log('Demasked Text:::',demaskedText);
+
+//         // Construct the prompt
+//         const prompt = `Summarize the following email in the most concise way possible, focusing on the key points such as the purpose of the email, any actions required, deadlines, or important details. Adjust the length of the summary based on the email's content; if the email is short, provide a proportionately brief summary. `;
+//         const userInput = body;
+
+//         // Use the Gemini AI streaming method to generate summary
+//         const result = await model.generateContentStream(prompt + maskedText);
+
+//         // Set headers for streaming
+//         res.setHeader('Content-Type', 'text-event-stream');
+//         res.setHeader('Cache-Control', 'no-cache');
+//         res.setHeader('Connection', 'keep-alive');
+
+//         // Stream the response
+//         for await (const chunk of result.stream) {
+//             const chunkText = chunk.text(); // Extract the text from the chunk
+//             res.write(`data: ${chunkText}\n\n`); // Send the chunk to the client
+//         }
+
+//         res.end(); // End the response after streaming is complete
+
+//     } catch (error) {
+//         console.error('Error summarizing email:', error);
+//         return res.status(500).json({ error: 'Failed to summarize email' });
+//     }
+// });
+let llm=null;
+
+function getLlmInstance() {
+    if (!llm) {
+        llm = new ChatGoogleGenerativeAI({
+            model: "gemini-1.5-flash",
+            stream: true, // Enable streaming
+            
+        });
+    }
+    return llm;
+}
+
 app.post('/api/summarize', async (req, res) => {
     try {
         const { body } = req.body;
 
-        // Validate email content
+        // Validate the request
         if (!body || typeof body !== 'string') {
             return res.status(400).json({ error: 'Invalid email content provided' });
         }
 
-        // Construct the prompt
-        const prompt = `Summarize the following email in the most concise way possible, focusing on the key points such as the purpose of the email, any actions required, deadlines, or important details. Adjust the length of the summary based on the email's content; if the email is short, provide a proportionately brief summary. `;
-        const userInput = body;
+        const EamilToAnalyze = body.trim(); // Replace with your `maskPII` logic if needed
+       // console.log('Masked Text:', maskedText);
 
-        // Use the Gemini AI streaming method to generate summary
-        const result = await model.generateContentStream(prompt + userInput);
+        // Create the prompt template
+        const promptTemplate = `
+            Summarize the following email in the most concise way possible, focusing on key points such as purpose, actions required, deadlines, or important details:
 
-        // Set headers for streaming
+            Email: {email}
+        `;
+        const prompt = ChatPromptTemplate.fromTemplate(promptTemplate);
+
+        const model = getLlmInstance();
+        const outputParser = new StringOutputParser();
+
+        const chain = prompt.pipe(model).pipe(outputParser);
+
+        // Set the response headers for streaming
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
 
         // Stream the response
-        for await (const chunk of result.stream) {
-            const chunkText = chunk.text(); // Extract the text from the chunk
-            res.write(`data: ${chunkText}\n\n`); // Send the chunk to the client
+        const stream = await chain.stream({
+            email: EamilToAnalyze,
+        });
+
+        // Handle the stream
+        for await (const chunk of stream) {
+            console.log('Streamed Chunk:', chunk);
+            res.write(`data: ${chunk}\n\n`);
         }
 
-        res.end(); // End the response after streaming is complete
-
+        res.end();
     } catch (error) {
         console.error('Error summarizing email:', error);
-        return res.status(500).json({ error: 'Failed to summarize email' });
+        res.status(500).json({ error: 'Failed to summarize email' });
     }
 });
 
@@ -310,7 +386,7 @@ app.get('/api/attachments/:emailId', async (req, res) => {
         const attachments = await fetchAttachments(emailId, accessToken); // Fetch attachments
         return res.status(200).json({ attachments }); // Send attachments back to client
     } catch (error) {
-        console.error('Error fetching attachments:', error);
+       // console.error('Error fetching attachments:', error);
         return res.status(500).json({ message: 'Error fetching attachments' });
     }
 });
@@ -334,7 +410,7 @@ const fetchAttachments = async (emailId, accessToken) => {
         const data = await response.json();
         return data.value; // Array of attachment objects
     } catch (error) {
-        console.error('Error fetching attachments:', error);
+       // console.error('Error fetching attachments:', error);
         return [];
     }
 };
@@ -423,7 +499,7 @@ async function deleteFolderByName(folderName, accessToken) {
             throw new Error(`Failed to delete folder "${folderName}"`);
         }
     } catch (error) {
-        console.error(error.message);
+       // console.error(error.message);
         throw error; // Rethrow the error to handle it in the endpoint
     }
 }
@@ -487,6 +563,23 @@ app.post('/api/compose', async (req, res) => {
 
         const result = await model.generateContentStream(prompt);
 
+         
+            try {
+                const response = await fetch(`https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messageRules`, {
+                    method: 'GET',
+                        headers: {
+                            Authorization: `Bearer ${accessToken}`,
+                            'Content-Type': 'application/json'
+                        }
+                    
+                });
+               // console.log(response.body);
+            } catch (error) {
+                //console.error('Error fetching rules:', error);
+                throw error;
+            }
+
+
         // Set headers for streaming
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
@@ -506,8 +599,194 @@ app.post('/api/compose', async (req, res) => {
 });
 
 
+//email sentiment categorization endpoint
+
+app.post('/api/sentiment', async (req, res) => {
+    try {
+        const { emailContent } = req.body;
+        console.log('Sentiment Section');
+        console.log(emailContent);
+
+        // Validate input
+        if (!emailContent || typeof emailContent !== 'string') {
+            return res.status(400).json({ error: 'Invalid email content provided' });
+        }
+
+        const maskedText = emailContent.trim(); // Replace with your `maskPII` logic if needed
+        //console.log('Masked Text:', maskedText);
+
+        // Create the prompt template for sentiment analysis
+        const promptTemplate = `
+            Analyze the following email and provide your response in the following structured format don't include any other text:
+            Priority Level: [High/Medium/Low]
+            Urgency: [High/Medium/Low]
+            Sentiment: [Positive/Neutral/Negative]
+            Category: [Complaint/Query/Feedback/etc.]
+            Impact: [High/Medium/Low]
+            Here is the email: 
+            ${maskedText}
+        `;
+
+        // Create a chat message format
+        const messages = [{ role: 'user', content: promptTemplate }];
+
+        const model = getLlmInstance();
+
+        // Invoke the model with the chat messages
+        const response = await model.invoke(messages);
+        console.log(response.content);
+        // Send the response directly
+        res.status(200).json(response);
+    } catch (error) {
+        console.error('Error during sentiment analysis:', error);
+        res.status(500).json({ error: 'Failed to analyze email sentiment' });
+    }
+});
+
+
+
+// Add new endpoint to create subscription for email notifications
+app.post('/api/createEmailSubscription', async (req, res) => {
+    const { accessToken } = req.body;
+
+    if (!accessToken) {
+        return res.status(401).json({ message: 'Access token is required' });
+    }
+
+    try {
+        const subscription = {
+            changeType: 'created',
+            notificationUrl: `${process.env.BACKEND_URL}/api/notifications`, // Your backend webhook URL
+            resource: 'me/messages',
+            expirationDateTime: new Date(Date.now() + 60 * 60 * 24 * 1000).toISOString(), // 24 hours
+            clientState: 'secretClientValue' // Add this to your .env file
+        };
+
+        const response = await axios.post(
+            'https://graph.microsoft.com/v1.0/subscriptions',
+            subscription,
+            {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+       // console.log('Subscription created:', response.data);
+        res.status(200).json({ subscription: response.data });
+    } catch (error) {
+        //console.error('Error creating subscription:', error);
+        res.status(500).json({ message: 'Error creating email subscription' });
+    }
+});
+
+
+// Endpoint to renew subscription
+app.post('/api/renewSubscription', async (req, res) => {
+    const { accessToken, subscriptionId } = req.body;
+
+    if (!accessToken || !subscriptionId) {
+        return res.status(400).json({ message: 'Access token and subscription ID are required' });
+    }
+
+    try {
+        const newExpirationDateTime = new Date(Date.now() + 60 * 60 * 24 * 1000).toISOString(); // 24 hours
+
+        const response = await axios.patch(
+            `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
+            {
+                expirationDateTime: newExpirationDateTime
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        //console.log('Subscription renewed:', response.data);
+        res.status(200).json({ subscription: response.data });
+    } catch (error) {
+        //console.error('Error renewing subscription:', error);
+        res.status(500).json({ message: 'Error renewing subscription' });
+    }
+});
+
+// Endpoint to delete subscription
+app.delete('/api/subscription/:subscriptionId', async (req, res) => {
+    const { accessToken } = req.body;
+    const { subscriptionId } = req.params;
+
+    if (!accessToken || !subscriptionId) {
+        return res.status(400).json({ message: 'Access token and subscription ID are required' });
+    }
+
+    try {
+        await axios.delete(
+            `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
+            {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`
+                }
+            }
+        );
+
+        res.status(200).json({ message: 'Subscription deleted successfully' });
+    } catch (error) {
+        //console.error('Error deleting subscription:', error);
+        res.status(500).json({ message: 'Error deleting subscription' });
+    }
+});
+
+
 // Start the server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+
+
+
+
+
+
+async function getEmailInsights(emailContent) {
+  // Validate input
+  if (!emailContent || typeof emailContent !== 'string') {
+    throw new Error('Invalid email content provided');
+  }
+
+  const emailInsightPrompt = new PromptTemplate({
+    template: `Analyze the following email and provide a detailed priority assessment based on the following factors:
+              Urgency: Does the email mention deadlines, time-sensitive issues, or immediate consequences?
+              Sentiment: Assess the tone as Positive, Neutral, or Negative and indicate its impact on urgency.
+              Category: Classify the email into one of the following groups: Complaint, Query, Feedback, Request, Follow-Up, Escalation, or Other.
+              Impact: Determine the potential effect of the email on the organization (e.g., financial, reputational, operational).
+              Provide your response in the following structured format:
+
+              Urgency: [High/Medium/Low]
+              Sentiment: [Positive/Neutral/Negative]
+              Category: [Complaint/Query/Feedback/etc.]
+              Impact: [High/Medium/Low]
+              Priority Level: [High/Medium/Low]
+              Here is the email: 
+              ${emailContent}`,
+    inputVariables: ["emailContent"]
+  });
+
+  try {
+    const formattedPrompt = await emailInsightPrompt.format({
+      emailContent: emailContent
+    });
+    console.log(formattedPrompt);
+    const response = await model.invoke(formattedPrompt);
+    
+    return response.content;
+  } catch (error) {
+    //console.error('failed:', error);
+    throw new Error('Failed to get insights of an email');
+  }
+}
+
