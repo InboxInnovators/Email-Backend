@@ -48,11 +48,31 @@ app.post('/api/emails', async (req, res) => {
                 Authorization: `Bearer ${accessToken}`,
             },
         });
-        
+
         const emails = response.data.value; // Extract the emails
-        res.status(200).json({ emails });
+        console.log(emails)
+        // Fetch folders to get parent folder names
+        const foldersResponse = await axios.get('https://graph.microsoft.com/v1.0/me/mailFolders', {
+            headers: {
+                Authorization: `Bearer ${accessToken}`
+            }
+        });
+
+        // Create a mapping of folder ID to folder name
+        const folderMap = {};
+        foldersResponse.data.value.forEach(folder => {
+            folderMap[folder.id] = folder.displayName; // Map folder ID to display name
+        });
+
+        // Add parent folder name to each email
+        const emailsWithFolderNames = emails.map(email => ({
+            ...email,
+            parentFolderName: folderMap[email.parentFolderId] || 'Unknown Folder' // Add parent folder name
+        }));
+
+        res.status(200).json({ emails: emailsWithFolderNames });
     } catch (error) {
-        //console.error("Error fetching emails:", error);
+        console.error("Error fetching emails:", error);
         return res.status(500).json({ message: "Error fetching emails" });
     }
 });
@@ -189,48 +209,29 @@ app.post('/api/summarize', async (req, res) => {
             return res.status(400).json({ error: 'Invalid email content provided' });
         }
 
-        const EamilToAnalyze = body.trim(); // Replace with your `maskPII` logic if needed
-       // console.log('Masked Text:', maskedText);
+        const emailToAnalyze = body.trim(); // Replace with your `maskPII` logic if needed
 
-        // Create the prompt template
-        const promptTemplate = `
-            Summarize the following email in the most concise way possible, focusing on key points such as purpose, actions required, deadlines, or important details:
+        // Construct the prompt for AI
+        const prompt = `Summarize the following email in the most concise way possible, focusing on key points such as purpose, actions required, deadlines, or important details:\n\nEmail: ${emailToAnalyze}`;
 
-            Email: {email}
-        `;
-        const prompt = ChatPromptTemplate.fromTemplate(promptTemplate);
+        
 
-        const model = getLlmInstance();
-        const outputParser = new StringOutputParser();
+        // Generate the summary
+        const result = await model.generateContent(prompt); // Use generateContent to generate the summary
 
-        const chain = prompt.pipe(model).pipe(outputParser);
+        // Extract the generated summary content
+        const summary = result.response.text(); // Ensure this matches your model's response structure
 
-        // Set the response headers for streaming
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-
-        // Stream the response
-        const stream = await chain.stream({
-            email: EamilToAnalyze,
-        });
-
-        // Handle the stream
-        for await (const chunk of stream) {
-            console.log('Streamed Chunk:', chunk);
-            res.write(`data: ${chunk}\n\n`);
-        }
-
-        res.end();
+        // Send the summary back to the client
+        res.status(200).json({ summary });
     } catch (error) {
         console.error('Error summarizing email:', error);
         res.status(500).json({ error: 'Failed to summarize email' });
     }
 });
-
-// New endpoint to send and save the email
+// New endpoint to send and save the email with CC
 app.post('/api/sendEmail', async (req, res) => {
-    const { accessToken, subject, body, recipients } = req.body; // Get access token and email details from request body
+    const { accessToken, subject, body, recipients, ccRecipients } = req.body; // Get access token and email details from request body
 
     if (!accessToken) {
         return res.status(401).json({ message: 'Access token is required' });
@@ -239,6 +240,13 @@ app.post('/api/sendEmail', async (req, res) => {
     if (!subject || !body || !recipients || !Array.isArray(recipients)) {
         return res.status(400).json({ message: 'Subject, body, and recipients are required' });
     }
+
+    // // Format recipients for the API
+    // const formattedRecipients = recipients.map(email => ({
+    //     emailAddress: {
+    //         address: email
+    //     }
+    // }));
 
     const message = {
         subject: subject,
@@ -250,7 +258,15 @@ app.post('/api/sendEmail', async (req, res) => {
             emailAddress: {
                 address: email
             }
-        }))
+        })),
+        // Add ccRecipients if provided
+        ccRecipients: ccRecipients && Array.isArray(ccRecipients)
+            ? ccRecipients.map(email => ({
+                emailAddress: {
+                    address: email
+                }
+            }))
+            : []
     };
 
     try {
@@ -274,8 +290,8 @@ app.post('/api/sendEmail', async (req, res) => {
     }
 });
 
-//Language translation endpoint 
 
+//Language translation endpoint 
 app.post('/translate', async (req, res) => {
     const { text, sourceLanguage, targetLanguage } = req.body;
 
@@ -290,7 +306,7 @@ app.post('/translate', async (req, res) => {
 
     try {
         // Ensure the prompt is formatted correctly
-        const response = await model.generateContent(`Translate the following text from ${sourceLanguage} to ${targetLanguage}: ${text}`);
+        const response = await model.generateContent(`You are a Translate API model, translate the following html email body from ${sourceLanguage} to ${targetLanguage}: ${text} in plain text format. don't give any other warnings or explaination`);
         const result=response.response.text();
         console.log('Response:',result)
 
@@ -551,47 +567,24 @@ async function renameFolder(token, folderId, newFolderName) {
 
 // Endpoint to generate email using AI
 app.post('/api/compose', async (req, res) => {
-    const { accessToken, subject, body } = req.body; // Get access token, subject, and body from request body
-
-    if (!accessToken || !subject || !body) {
+    const { accessToken, body } = req.body; // Get access token, subject, and body from request body
+   console.log(body)
+    if (!accessToken  || !body) {
         return res.status(400).json({ error: 'Access token, subject, and body are required' });
     }
 
     try {
         // Construct the prompt for AI
-        const prompt = `Compose professional email using subject "${subject}" and content: ${body}`;
+        const prompt = `You're a Smart Email Composer API, Compose a professional email using prompt: ${body}`;
 
-        const result = await model.generateContentStream(prompt);
+        // Generate the email content
+        const response = await model.generateContent(prompt); // Use generateContent instead of invoke
+        // Extract the generated email content
+        const result=response.response.text();
+        console.log('Response:',result)
 
-         
-            try {
-                const response = await fetch(`https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messageRules`, {
-                    method: 'GET',
-                        headers: {
-                            Authorization: `Bearer ${accessToken}`,
-                            'Content-Type': 'application/json'
-                        }
-                    
-                });
-               // console.log(response.body);
-            } catch (error) {
-                //console.error('Error fetching rules:', error);
-                throw error;
-            }
-
-
-        // Set headers for streaming
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-
-        // Stream the response
-        for await (const chunk of result.stream) {
-            const chunkText = chunk.text(); // Extract the text from the chunk
-            res.write(`${chunkText}\n\n`); // Send the chunk to the client
-        }
-
-        res.end();
+        res.status(200).json({ email:result });
+        
     } catch (error) {
         console.error('Error generating email:', error);
         return res.status(500).json({ error: 'Failed to generate email' });
@@ -600,10 +593,10 @@ app.post('/api/compose', async (req, res) => {
 
 
 //email sentiment categorization endpoint
-
 app.post('/api/sentiment', async (req, res) => {
     try {
         const { emailContent } = req.body;
+        let {emailSubject} = req.body;
         console.log('Sentiment Section');
         console.log(emailContent);
 
@@ -612,19 +605,46 @@ app.post('/api/sentiment', async (req, res) => {
             return res.status(400).json({ error: 'Invalid email content provided' });
         }
 
-        const maskedText = emailContent.trim(); // Replace with your `maskPII` logic if needed
+        const emailBody = emailContent.trim(); // Replace with your `maskPII` logic if needed
+        emailSubject = emailSubject.trim();
         //console.log('Masked Text:', maskedText);
 
         // Create the prompt template for sentiment analysis
         const promptTemplate = `
-            Analyze the following email and provide your response in the following structured format don't include any other text:
-            Priority Level: [High/Medium/Low]
-            Urgency: [High/Medium/Low]
-            Sentiment: [Positive/Neutral/Negative]
-            Category: [Complaint/Query/Feedback/etc.]
-            Impact: [High/Medium/Low]
-            Here is the email: 
-            ${maskedText}
+            Analyze the following email and respond with a JSON object in the exact format provided below, also make sure there are no leading/trailing characters (e.g., whitespace, quotes, or unexpected symbols in between or end or start of json. The output must not include any additional text, code blocks, or formatting. Ensure the JSON is valid and does not include comments or extraneous characters.
+
+            Format:
+            {
+                "Priority Level":High/Medium/Low,
+                "Urgency":High/Medium/Low,
+                "Sentiment":Positive/Neutral/Negative,
+                "Category":Complaint/Query/Feedback/Product Enquiry/etc,
+                "Impact":High/Medium/Low,
+                "Product":[]
+            }
+
+            Here is the email Subject:
+            ${emailSubject}
+
+            Here is the email Body:
+            ${emailBody}
+
+            If the category is "Product Enquiry", based on the email content, fill the "Product" array with the closest matches to at least one of the products listed below. If no match is found, leave the "Product" array empty.
+
+            Products:
+            {
+                "Managed IT Support Services",
+                "Cloud Hosting Solutions",
+                "Custom Software Development",
+                "IT Consulting",
+                "Cybersecurity Solutions",
+                "IT Infrastructure Setup",
+                "Backup and Disaster Recovery",
+                "IT Audits and Compliance",
+                "Network Design and Implementation",
+                "Hardware Procurement and Installation"
+            }
+    
         `;
 
         // Create a chat message format
@@ -634,7 +654,12 @@ app.post('/api/sentiment', async (req, res) => {
 
         // Invoke the model with the chat messages
         const response = await model.invoke(messages);
-        console.log(response.content);
+        console.log('the sentiment analysis content is ***********************************');
+        console.log(response.content);  
+        // if(response.content.Category == 'Product Enquiry')
+        // {
+        //     response.content['Product Enquired'] = 
+        // }
         // Send the response directly
         res.status(200).json(response);
     } catch (error) {
@@ -739,6 +764,70 @@ app.delete('/api/subscription/:subscriptionId', async (req, res) => {
         res.status(500).json({ message: 'Error deleting subscription' });
     }
 });
+
+// Endpoint to update the read status of a specific email
+app.patch('/api/markAsRead', async (req, res) => {
+    const { accessToken,messageId } = req.body; // Get the access token from the request body
+    console.log('Mark As Read API')
+    if (!accessToken) {
+        return res.status(401).json({ message: 'Access token is required' });
+    }
+
+    if (!messageId) {
+        return res.status(400).json({ message: 'Email ID is required' });
+    }
+
+    try {
+        // Update the read status of the email
+        await axios.patch(
+            `https://graph.microsoft.com/v1.0/me/messages/${messageId}`,
+            { isRead: true },
+            {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        console.log(`Email with ID ${messageId} marked as read.`);
+        return res.status(200).json({ message: `Email with ID ${messageId} marked as read.` });
+    } catch (error) {
+        console.error('Error updating email status:', error.response ? error.response.data : error.message);
+        return res.status(500).json({ message: 'Error updating email status.' });
+    }
+});
+
+// salesforce product 
+
+app.post('/api/fetchProductDetails' , async(req , res) =>{
+    try{
+        const {products} =  req.body;
+        const username = 'joiningapp7@resourceful-fox-7w3tc4.com'; // Salesforce username
+        const password = 'Hello@123123CwozoRmQ28h4Fkx24mCyNU8q'; // Salesforce password
+        const connection = new jsforce.Connection({
+            loginUrl: 'https://login.salesforce.com'
+        });
+        try {
+            await connection.login(username, password); // Log in to Salesforce
+            console.log('Logged in successfully!');
+            const endpoint = `/ProductSummary?products=${products}`;
+            const response = await connection.apex.get(endpoint);
+            console.log('Response:', response);
+            res.status(200).json({ ...response }); 
+            // Send details back to client
+        } catch (error) {
+            console.error('Error during Salesforce operation:', error);
+            return res.status(500).json({ message: 'Error fetching product details from Salesforce' });
+        }
+
+    }
+    catch(exception)
+    {
+
+    }
+});
+
 
 
 // Start the server
